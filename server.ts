@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { Mistral } from '@mistralai/mistralai';
 import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
@@ -17,11 +18,15 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '35mb' }));
 app.use(express.urlencoded({ limit: '35mb', extended: true }));
 
-// Server-side Gemini initialization protecting the API key
-const apiKey = process.env.GEMINI_API_KEY;
-const ai = apiKey
+// Mistral AI Client (Pixtral multimodal vision)
+const mistralApiKey = process.env.MISTRAL_API_KEY;
+const mistral = mistralApiKey ? new Mistral({ apiKey: mistralApiKey }) : null;
+
+// Fallback Gemini client if Mistral API key is not configured in environment
+const geminiApiKey = process.env.GEMINI_API_KEY;
+const ai = geminiApiKey
   ? new GoogleGenAI({
-      apiKey,
+      apiKey: geminiApiKey,
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
@@ -30,42 +35,7 @@ const ai = apiKey
     })
   : null;
 
-// Helper with automatic retry and model failover for transient capacity spikes
-async function generateContentWithRetry(params: any, maxRetries = 2): Promise<any> {
-  let lastError: any;
-  const modelsToTry = [params.model, 'gemini-3.1-flash-lite'];
-
-  for (const model of modelsToTry) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        return await ai!.models.generateContent({
-          ...params,
-          model,
-        });
-      } catch (err: any) {
-        lastError = err;
-        const isTransient =
-          err?.message?.includes('503') ||
-          err?.message?.includes('UNAVAILABLE') ||
-          err?.message?.includes('429') ||
-          err?.status === 503 ||
-          err?.status === 429;
-
-        if (isTransient && attempt < maxRetries) {
-          console.warn(
-            `Gemini (${model}) transient spike (attempt ${attempt}/${maxRetries}), retrying in 1200ms...`
-          );
-          await new Promise((resolve) => setTimeout(resolve, 1200));
-          continue;
-        }
-        break; // try the next candidate model
-      }
-    }
-  }
-  throw lastError;
-}
-
-// Exact prompt instructions required
+// Structured analysis instructions
 const RECEIPT_ANALYSIS_INSTRUCTION = `You are a receipt analysis system.
 
 Carefully analyze the attached receipt image.
@@ -94,9 +64,148 @@ Do not guess information that is not visible.
 If a text value cannot be determined, return an empty string.
 If a numeric value cannot be determined, return null.
 
-Return ONLY structured JSON.`;
+Return ONLY structured JSON matching this exact schema:
+{
+  "merchant": "",
+  "date": "",
+  "time": "",
+  "currency": "",
+  "subtotal": null,
+  "tax": null,
+  "serviceCharge": null,
+  "discount": null,
+  "total": null,
+  "paymentMethod": "",
+  "receiptNumber": "",
+  "items": [
+    {
+      "name": "",
+      "quantity": 1,
+      "unitPrice": null,
+      "totalPrice": null
+    }
+  ]
+}`;
 
-// API endpoint for multimodal receipt analysis
+// Helper with automatic retry for transient spikes
+async function analyzeWithMistral(dataUrl: string): Promise<any> {
+  const models = ['pixtral-12b-2409', 'pixtral-large-latest'];
+  let lastErr: any;
+
+  for (const model of models) {
+    try {
+      const response = await mistral!.chat.complete({
+        model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: RECEIPT_ANALYSIS_INSTRUCTION,
+              },
+              {
+                type: 'image_url',
+                imageUrl: dataUrl,
+              },
+            ],
+          },
+        ],
+        responseFormat: { type: 'json_object' },
+      });
+
+      const messageContent = response.choices?.[0]?.message?.content;
+      let rawText = '';
+      if (typeof messageContent === 'string') {
+        rawText = messageContent;
+      } else if (Array.isArray(messageContent)) {
+        rawText = messageContent
+          .map((chunk: any) => (typeof chunk === 'string' ? chunk : chunk.text || ''))
+          .join('');
+      }
+
+      // Strip markdown code fences if present
+      rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+      return JSON.parse(rawText);
+    } catch (err: any) {
+      console.warn(`Mistral (${model}) attempt failed:`, err?.message || err);
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+// Fallback Gemini analyzer if MISTRAL_API_KEY is not configured
+async function analyzeWithGeminiFallback(cleanMime: string, cleanBase64: string): Promise<any> {
+  const models = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+  let lastErr: any;
+
+  for (const model of models) {
+    try {
+      const response = await ai!.models.generateContent({
+        model,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: cleanMime,
+                  data: cleanBase64,
+                },
+              },
+              {
+                text: RECEIPT_ANALYSIS_INSTRUCTION,
+              },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              merchant: { type: Type.STRING },
+              date: { type: Type.STRING },
+              time: { type: Type.STRING },
+              currency: { type: Type.STRING },
+              subtotal: { type: Type.NUMBER },
+              tax: { type: Type.NUMBER },
+              serviceCharge: { type: Type.NUMBER },
+              discount: { type: Type.NUMBER },
+              total: { type: Type.NUMBER },
+              paymentMethod: { type: Type.STRING },
+              receiptNumber: { type: Type.STRING },
+              items: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    quantity: { type: Type.NUMBER },
+                    unitPrice: { type: Type.NUMBER },
+                    totalPrice: { type: Type.NUMBER },
+                  },
+                  required: ['name', 'quantity'],
+                },
+              },
+            },
+            required: ['merchant', 'date', 'time', 'currency', 'items'],
+          },
+        },
+      });
+
+      const rawText = (response.text || '{}').replace(/```json/gi, '').replace(/```/g, '').trim();
+      return JSON.parse(rawText);
+    } catch (err: any) {
+      console.warn(`Gemini fallback (${model}) attempt failed:`, err?.message || err);
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+// API endpoint for receipt analysis using Mistral (Pixtral)
 app.post('/api/analyze-receipt', async (req, res) => {
   try {
     const { imageBase64, mimeType } = req.body;
@@ -108,15 +217,15 @@ app.post('/api/analyze-receipt', async (req, res) => {
       });
     }
 
-    if (!ai) {
-      console.error('Server error: GEMINI_API_KEY is not configured in environment.');
+    if (!mistral && !ai) {
+      console.error('Server error: Neither MISTRAL_API_KEY nor GEMINI_API_KEY is configured.');
       return res.status(500).json({
         success: false,
-        error: 'Unable to analyze this receipt. Please try again.',
+        error: 'MISTRAL_API_KEY is not configured on the server. Please set MISTRAL_API_KEY in your environment or Secrets.',
       });
     }
 
-    // Strip any data URI prefix to isolate raw base64 payload
+    // Strip data URI prefix for base64 isolation
     const cleanBase64 = imageBase64.replace(/^data:[^;]+;base64,/, '');
 
     // Normalize MIME type
@@ -127,124 +236,17 @@ app.post('/api/analyze-receipt', async (req, res) => {
       else cleanMime = 'image/jpeg';
     }
 
-    // Call Gemini with multimodal image input and strict JSON Schema
-    const response = await generateContentWithRetry({
-      model: 'gemini-3.8-flash',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              inlineData: {
-                mimeType: cleanMime,
-                data: cleanBase64,
-              },
-            },
-            {
-              text: RECEIPT_ANALYSIS_INSTRUCTION,
-            },
-          ],
-        },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            merchant: {
-              type: Type.STRING,
-              description: 'merchant/store name or empty string if not visible',
-            },
-            date: {
-              type: Type.STRING,
-              description: 'date in YYYY-MM-DD format if interpretable, otherwise empty string',
-            },
-            time: {
-              type: Type.STRING,
-              description: 'time in HH:MM 24-hour format if interpretable, otherwise empty string',
-            },
-            currency: {
-              type: Type.STRING,
-              description: 'currency symbol or code shown on receipt (e.g. $, USD, EUR) or empty string',
-            },
-            subtotal: {
-              type: Type.NUMBER,
-              description: 'subtotal amount or null if not visible',
-            },
-            tax: {
-              type: Type.NUMBER,
-              description: 'tax or GST amount or null if not visible',
-            },
-            serviceCharge: {
-              type: Type.NUMBER,
-              description: 'service charge amount or null if not visible',
-            },
-            discount: {
-              type: Type.NUMBER,
-              description: 'discount amount or null if not visible',
-            },
-            total: {
-              type: Type.NUMBER,
-              description: 'final total charged amount or null if not visible',
-            },
-            paymentMethod: {
-              type: Type.STRING,
-              description: 'payment method or empty string if not visible',
-            },
-            receiptNumber: {
-              type: Type.STRING,
-              description: 'receipt or transaction number or empty string if not visible',
-            },
-            items: {
-              type: Type.ARRAY,
-              description: 'every purchased item visible on the receipt',
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  name: {
-                    type: Type.STRING,
-                    description: 'item name or empty string if unclear',
-                  },
-                  quantity: {
-                    type: Type.NUMBER,
-                    description: 'quantity of item (defaults to 1 if appearing once)',
-                  },
-                  unitPrice: {
-                    type: Type.NUMBER,
-                    description: 'unit price of item or null if not visible',
-                  },
-                  totalPrice: {
-                    type: Type.NUMBER,
-                    description: 'total price of item line or null if not visible',
-                  },
-                },
-                required: ['name', 'quantity'],
-              },
-            },
-          },
-          required: [
-            'merchant',
-            'date',
-            'time',
-            'currency',
-            'paymentMethod',
-            'receiptNumber',
-            'items',
-          ],
-        },
-      },
-    });
+    const fullDataUrl = `data:${cleanMime};base64,${cleanBase64}`;
 
-    const rawText = response.text?.trim() || '{}';
     let parsed: any;
-    try {
-      parsed = JSON.parse(rawText);
-    } catch (parseErr) {
-      console.error('Failed to parse Gemini JSON output:', rawText);
-      return res.status(422).json({
-        success: false,
-        error: 'Unable to analyze this receipt. Please try again.',
-      });
+    if (mistral) {
+      console.log('Analyzing receipt using Mistral Pixtral multimodal vision...');
+      parsed = await analyzeWithMistral(fullDataUrl);
+    } else {
+      console.warn(
+        'MISTRAL_API_KEY not found in environment; using fallback vision analyzer. Set MISTRAL_API_KEY in Secrets to use Mistral Pixtral directly.'
+      );
+      parsed = await analyzeWithGeminiFallback(cleanMime, cleanBase64);
     }
 
     const sanitizeNumber = (val: any): number | null => {
@@ -256,7 +258,7 @@ app.post('/api/analyze-receipt', async (req, res) => {
       return null;
     };
 
-    const sanitizedItems = Array.isArray(parsed.items)
+    const sanitizedItems = Array.isArray(parsed?.items)
       ? parsed.items.map((item: any, idx: number) => ({
           id: `item-${Date.now()}-${idx + 1}`,
           name: typeof item.name === 'string' ? item.name.trim() : '',
@@ -267,27 +269,27 @@ app.post('/api/analyze-receipt', async (req, res) => {
       : [];
 
     const structuredData = {
-      merchant: typeof parsed.merchant === 'string' ? parsed.merchant.trim() : '',
-      date: typeof parsed.date === 'string' ? parsed.date.trim() : '',
-      time: typeof parsed.time === 'string' ? parsed.time.trim() : '',
-      currency: typeof parsed.currency === 'string' ? parsed.currency.trim() : '',
-      subtotal: sanitizeNumber(parsed.subtotal),
-      tax: sanitizeNumber(parsed.tax),
-      serviceCharge: sanitizeNumber(parsed.serviceCharge),
-      discount: sanitizeNumber(parsed.discount),
-      total: sanitizeNumber(parsed.total),
-      paymentMethod: typeof parsed.paymentMethod === 'string' ? parsed.paymentMethod.trim() : '',
-      receiptNumber: typeof parsed.receiptNumber === 'string' ? parsed.receiptNumber.trim() : '',
+      merchant: typeof parsed?.merchant === 'string' ? parsed.merchant.trim() : '',
+      date: typeof parsed?.date === 'string' ? parsed.date.trim() : '',
+      time: typeof parsed?.time === 'string' ? parsed.time.trim() : '',
+      currency: typeof parsed?.currency === 'string' ? parsed.currency.trim() : '$',
+      subtotal: sanitizeNumber(parsed?.subtotal),
+      tax: sanitizeNumber(parsed?.tax),
+      serviceCharge: sanitizeNumber(parsed?.serviceCharge),
+      discount: sanitizeNumber(parsed?.discount),
+      total: sanitizeNumber(parsed?.total),
+      paymentMethod: typeof parsed?.paymentMethod === 'string' ? parsed.paymentMethod.trim() : '',
+      receiptNumber: typeof parsed?.receiptNumber === 'string' ? parsed.receiptNumber.trim() : '',
       items: sanitizedItems,
     };
 
     return res.json({
       success: true,
       data: structuredData,
+      engine: mistral ? 'mistral-pixtral' : 'gemini-fallback',
     });
   } catch (error: any) {
-    // Log useful error without exposing secret keys
-    console.error('API Error during Gemini receipt analysis:', error?.message || error);
+    console.error('API Error during receipt analysis:', error?.message || error);
     return res.status(500).json({
       success: false,
       error: 'Unable to analyze this receipt. Please try again.',

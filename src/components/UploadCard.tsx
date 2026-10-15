@@ -234,7 +234,7 @@ export const UploadCard: React.FC<UploadCardProps> = ({
             </button>
             {isAnalyzing && (
               <p className="text-xs text-center text-slate-500 mt-2 animate-pulse">
-                Gemini vision is reading merchant, items, taxes, and totals...
+                Mistral Pixtral is reading merchant, items, taxes, and totals...
               </p>
             )}
           </div>

@@ -22,7 +22,7 @@ export const Header: React.FC<HeaderProps> = ({ savedCount, onOpenSaved, onNewSc
             <div className="flex items-center gap-1.5">
               <span className="font-bold text-slate-900 tracking-tight text-lg">Receipt Scanner</span>
               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-200/60">
-                <Sparkles className="w-2.5 h-2.5 mr-0.5 text-blue-600" /> AI Vision
+                <Sparkles className="w-2.5 h-2.5 mr-0.5 text-blue-600" /> Mistral Vision
               </span>
             </div>
             <p className="text-xs text-slate-500 hidden sm:block">Instant multimodal receipt extraction</p>
