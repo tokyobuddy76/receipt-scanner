@@ -223,7 +223,7 @@ export const UploadCard: React.FC<UploadCardProps> = ({
               {isAnalyzing ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Analyzing receipt...</span>
+                  <span>Analyzing...</span>
                 </>
               ) : (
                 <>

@@ -71,8 +71,7 @@ export default function App() {
 
       if (!response.ok || !result.success) {
         setError(
-          result.error ||
-            "We couldn't read this receipt. Try taking a clearer photo or uploading another image."
+          result.error || 'Unable to analyze this receipt. Please try again.'
         );
         return;
       }
@@ -82,9 +81,7 @@ export default function App() {
       showToast('Receipt analyzed successfully!');
     } catch (err: any) {
       console.error('Analysis request error:', err);
-      setError(
-        "We couldn't read this receipt. Try taking a clearer photo or uploading another image."
-      );
+      setError('Unable to analyze this receipt. Please try again.');
     } finally {
       setIsAnalyzing(false);
     }
