@@ -1,0 +1,10 @@
+{
+  "name": "Receipt Scanner",
+  "description": "Upload or snap a receipt to automatically extract merchant, date, items, prices, and totals with Gemini multimodal vision.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
