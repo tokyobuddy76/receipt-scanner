@@ -56,7 +56,7 @@ export default function App() {
     setError(null);
 
     try {
-      const response = await fetch('/api/analyze-receipt', {
+      const response = await fetch('/api/receiptscanner', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
