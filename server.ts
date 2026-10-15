@@ -30,27 +30,35 @@ const ai = apiKey
     })
   : null;
 
-// Helper with exponential backoff for transient 503/429 spikes
-async function generateContentWithRetry(params: any, maxRetries = 3): Promise<any> {
+// Helper with exponential backoff and model failover for transient 503/429 spikes
+async function generateContentWithRetry(params: any, maxRetries = 2): Promise<any> {
   let lastError: any;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await ai!.models.generateContent(params);
-    } catch (err: any) {
-      lastError = err;
-      const isTransient =
-        err?.message?.includes('503') ||
-        err?.message?.includes('UNAVAILABLE') ||
-        err?.message?.includes('429') ||
-        err?.status === 503 ||
-        err?.status === 429;
+  // Primary model is gemini-3.8-flash; failover to gemini-3.1-flash-lite if service is experiencing spikes
+  const modelsToTry = [params.model, 'gemini-3.1-flash-lite'];
 
-      if (isTransient && attempt < maxRetries) {
-        console.warn(`Gemini API transient spike (attempt ${attempt}/${maxRetries}), retrying in ${attempt * 1500}ms...`);
-        await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
-        continue;
+  for (const model of modelsToTry) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await ai!.models.generateContent({
+          ...params,
+          model,
+        });
+      } catch (err: any) {
+        lastError = err;
+        const isTransient =
+          err?.message?.includes('503') ||
+          err?.message?.includes('UNAVAILABLE') ||
+          err?.message?.includes('429') ||
+          err?.status === 503 ||
+          err?.status === 429;
+
+        if (isTransient && attempt < maxRetries) {
+          console.warn(`Gemini (${model}) transient spike (attempt ${attempt}/${maxRetries}), retrying in 1200ms...`);
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+        break; // proceed to next candidate model
       }
-      throw err;
     }
   }
   throw lastError;
